@@ -1,3 +1,4 @@
+mod api_server;
 mod local_plugin_crypto;
 
 use flate2::read::GzDecoder;
@@ -14,13 +15,14 @@ use std::fs;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::Read;
+use std::io::Write;
 use std::net::{TcpListener, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, UNIX_EPOCH};
 use tauri::Manager;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Aria2RpcConfig {
     rpc_port: u16,
@@ -629,6 +631,73 @@ fn validate_task_parameters(payload: &CreateTaskPayload) -> Result<ValidatedTask
     })
 }
 
+// 自己拉起的 aria2 子进程句柄与它使用的 RPC 配置，退出时必须回收，否则会残留占着 RPC 端口
+static ARIA2_CHILD: std::sync::Mutex<Option<std::process::Child>> = std::sync::Mutex::new(None);
+static ARIA2_RPC: std::sync::Mutex<Option<Aria2RpcConfig>> = std::sync::Mutex::new(None);
+
+fn remember_engine_child(child: std::process::Child) {
+    if let Ok(mut slot) = ARIA2_CHILD.lock() {
+        if let Some(mut previous) = slot.take() {
+            let _ = previous.kill();
+            let _ = previous.wait();
+        }
+        *slot = Some(child);
+    }
+}
+
+// 退出前先让 aria2 自己收尾（落盘 .aria2 控制文件），比直接 kill 更不容易丢进度
+fn request_engine_shutdown(config: &Aria2RpcConfig) {
+    let address = match format!("127.0.0.1:{}", config.rpc_port).parse() {
+        Ok(address) => address,
+        Err(_) => return,
+    };
+    let mut stream =
+        match std::net::TcpStream::connect_timeout(&address, Duration::from_millis(600)) {
+            Ok(stream) => stream,
+            Err(_) => return,
+        };
+    let params = if config.rpc_secret.trim().is_empty() {
+        Vec::new()
+    } else {
+        vec![format!("token:{}", config.rpc_secret.trim())]
+    };
+    let payload = json!({
+        "jsonrpc": "2.0",
+        "id": "shutdown",
+        "method": "aria2.forceShutdown",
+        "params": params
+    })
+    .to_string();
+    let request = format!(
+        "POST /jsonrpc HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        payload.len(),
+        payload
+    );
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(600)));
+    let _ = stream.write_all(request.as_bytes());
+    let _ = stream.flush();
+}
+
+fn terminate_engine() {
+    let config = ARIA2_RPC.lock().ok().and_then(|guard| guard.clone());
+    if let Some(config) = config {
+        request_engine_shutdown(&config);
+    }
+    if let Ok(mut slot) = ARIA2_CHILD.lock() {
+        if let Some(mut child) = slot.take() {
+            for _ in 0..15 {
+                match child.try_wait() {
+                    Ok(Some(_)) => return,
+                    Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+                    Err(_) => break,
+                }
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
 fn spawn_aria2_with_path(executable: &PathBuf, config: &Aria2RpcConfig) -> Result<(), String> {
     let mut command = Command::new(executable);
     command
@@ -653,7 +722,8 @@ fn spawn_aria2_with_path(executable: &PathBuf, config: &Aria2RpcConfig) -> Resul
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x08000000);
     }
-    command.spawn().map_err(|error| error.to_string())?;
+    let child = command.spawn().map_err(|error| error.to_string())?;
+    remember_engine_child(child);
     Ok(())
 }
 
@@ -848,6 +918,9 @@ fn update_or_install_aria2_with_winget() -> Result<(), String> {
 }
 
 fn start_aria2_process(config: &Aria2RpcConfig) -> Result<(), String> {
+    if let Ok(mut slot) = ARIA2_RPC.lock() {
+        *slot = Some(config.clone());
+    }
     let candidates = collect_aria2_candidates(config);
     let mut failures = Vec::new();
     for candidate in &candidates {
@@ -3342,6 +3415,8 @@ pub fn run() {
             }
 
             tray_builder.build(app)?;
+
+            api_server::start(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -3385,8 +3460,15 @@ pub fn run() {
             plugin_precheck_local,
             plugin_import_local,
             plugin_uninstall,
-            plugin_toggle_enabled
+            plugin_toggle_enabled,
+            api_server::api_get_info,
+            api_server::api_update_config
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app_handle, event| {
+            if let tauri::RunEvent::Exit = event {
+                terminate_engine();
+            }
+        });
 }

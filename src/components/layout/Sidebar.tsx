@@ -1,4 +1,4 @@
-import { List, Plus, HelpCircle, Settings, Blocks } from 'lucide-react';
+import { List, Plus, HelpCircle, Settings, Blocks, Braces } from 'lucide-react';
 import { cn } from '../../utils/cn';
 import { Link, useLocation } from 'react-router-dom';
 
@@ -40,6 +40,17 @@ export default function Sidebar({ onNewTask, onOpenAbout }: SidebarProps) {
           )}
         >
           <Blocks size={22} strokeWidth={2} />
+        </Link>
+        <Link
+          to="/api"
+          className={cn(
+            "p-2 rounded-lg transition-colors cursor-pointer",
+            location.pathname.startsWith('/api')
+              ? "text-primary" 
+              : "text-text-muted hover:text-text-main hover:bg-black/5"
+          )}
+        >
+          <Braces size={22} strokeWidth={2} />
         </Link>
         <button 
           onClick={onNewTask}

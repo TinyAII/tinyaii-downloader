@@ -6,6 +6,7 @@ import TaskSidebar from './components/layout/TaskSidebar';
 import TitleBar from './components/layout/TitleBar';
 import { appExit, appIsAutostartLaunch } from './services/app/appRuntime';
 import { checkVersionUpdate } from './services/app/backendApi';
+import { apiUpdateConfig } from './services/app/localApi';
 import { appGetInstallDir, appHttpGetText, aria2SetGlobalSpeedLimit, aria2SetGlobalTrackerList, aria2StartTask } from './services/download/aria2RpcEngine';
 import { captureWindowState, restoreWindowState } from './services/app/windowState';
 import { useBasicSettingsStore } from './store/settings/basicStore';
@@ -33,6 +34,7 @@ const Completed = lazy(() => import('./pages/Completed'));
 const BasicSettings = lazy(() => import('./pages/Settings/BasicSettings'));
 const AdvancedSettings = lazy(() => import('./pages/Settings/AdvancedSettings'));
 const DeveloperLogs = lazy(() => import('./pages/Settings/DeveloperLogs'));
+const ApiPanel = lazy(() => import('./pages/Api/ApiPanel'));
 const InstalledPlugins = lazy(() => import('./pages/Plugins/InstalledPlugins'));
 const DiscoverPlugins = lazy(() => import('./pages/Plugins/DiscoverPlugins'));
 const ImportPlugins = lazy(() => import('./pages/Plugins/ImportPlugins'));
@@ -157,6 +159,20 @@ function InnerApp() {
     return () => {
       canceled = true;
     };
+  }, []);
+
+  // 把 aria2 RPC 配置同步给本地 API 服务，避免它一直用默认端口
+  useEffect(() => {
+    const pushApiConfig = () => {
+      const state = useAdvancedSettingsStore.getState();
+      void apiUpdateConfig({
+        rpcPort: state.rpcPort,
+        rpcSecret: state.rpcSecret,
+        aria2ExecutablePath: state.aria2ExecutablePath,
+      }).catch(() => undefined);
+    };
+    pushApiConfig();
+    return useAdvancedSettingsStore.subscribe(pushApiConfig);
   }, []);
 
   useEffect(() => {
@@ -436,6 +452,7 @@ function InnerApp() {
                 path="/settings/developer-logs"
                 element={showDeveloperLogsEntry ? <DeveloperLogs /> : <Navigate to="/settings/advanced" replace />}
               />
+              <Route path="/api" element={<ApiPanel />} />
               <Route path="/plugins" element={<Navigate to="/plugins/installed" replace />} />
               <Route path="/plugins/installed" element={<InstalledPlugins />} />
               <Route path="/plugins/discover" element={<DiscoverPlugins />} />
