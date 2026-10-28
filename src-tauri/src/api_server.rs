@@ -153,6 +153,7 @@ fn handle_stream(mut stream: TcpStream, shared: Arc<ApiShared>) {
         ("POST", ["api", "v1", "tasks", id, "pause"]) => task_action(&config, id, "aria2.pause"),
         ("POST", ["api", "v1", "tasks", id, "resume"]) => task_action(&config, id, "aria2.unpause"),
         ("POST", ["api", "v1", "tasks", id, "remove"]) => remove_task(&config, id),
+        ("POST", ["mcp"]) => mcp_handle(&config, &request.body),
         _ => (404, error_body("not_found", "接口不存在")),
     };
 
@@ -332,6 +333,182 @@ fn remove_task(config: &Aria2RpcConfig, gid: &str) -> (u16, Value) {
         Ok(_) => (200, json!({ "ok": true })),
         Err(message) => (502, error_body("engine_error", &message)),
     }
+}
+
+const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
+
+fn mcp_tools() -> Value {
+    json!([
+        {
+            "name": "get_server_status",
+            "description": "查看下载器与 aria2 引擎的运行状态",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+        },
+        {
+            "name": "list_downloads",
+            "description": "列出下载任务，可按状态过滤",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "enum": ["all", "downloading", "seeding", "paused", "stopped", "completed", "failed"],
+                        "description": "默认 all"
+                    }
+                }
+            }
+        },
+        {
+            "name": "get_download",
+            "description": "按 gid 查询单个任务的详情",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "gid": { "type": "string" } },
+                "required": ["gid"]
+            }
+        },
+        {
+            "name": "create_download",
+            "description": "用直链创建下载任务；不接受网盘分享链接（需在客户端内解析）",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "links": { "type": "array", "items": { "type": "string" } },
+                    "savePath": { "type": "string", "description": "缺省为 用户目录/Downloads" },
+                    "rename": { "type": "string" },
+                    "splitCount": { "type": "integer" },
+                    "maxConnectionsPerServer": { "type": "integer" }
+                },
+                "required": ["links"]
+            }
+        },
+        {
+            "name": "control_download",
+            "description": "暂停、继续或删除任务",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "gid": { "type": "string" },
+                    "action": { "type": "string", "enum": ["pause", "resume", "remove"] }
+                },
+                "required": ["gid", "action"]
+            }
+        }
+    ])
+}
+
+fn mcp_handle(config: &Aria2RpcConfig, body: &[u8]) -> (u16, Value) {
+    let message: Value = match serde_json::from_slice(body) {
+        Ok(value) => value,
+        Err(error) => {
+            return (
+                400,
+                json!({ "jsonrpc": "2.0", "id": Value::Null, "error": { "code": -32700, "message": format!("解析失败: {error}") } }),
+            )
+        }
+    };
+
+    let id = message.get("id").cloned().unwrap_or(Value::Null);
+    let method = message.get("method").and_then(Value::as_str).unwrap_or_default();
+
+    // 通知类消息（如 notifications/initialized）没有 id，不需要返回内容
+    if id.is_null() {
+        return (202, json!({}));
+    }
+
+    let outcome = match method {
+        "initialize" => Ok(json!({
+            "protocolVersion": MCP_PROTOCOL_VERSION,
+            "capabilities": { "tools": {} },
+            "serverInfo": { "name": "tinyaii-downloader", "version": "1.0.0" }
+        })),
+        "ping" => Ok(json!({})),
+        "tools/list" => Ok(json!({ "tools": mcp_tools() })),
+        "tools/call" => mcp_call_tool(config, message.get("params").cloned().unwrap_or(Value::Null)),
+        other => Err((-32601, format!("不支持的方法: {other}"))),
+    };
+
+    match outcome {
+        Ok(result) => (200, json!({ "jsonrpc": "2.0", "id": id, "result": result })),
+        Err((code, message)) => (
+            200,
+            json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } }),
+        ),
+    }
+}
+
+fn mcp_call_tool(config: &Aria2RpcConfig, params: Value) -> Result<Value, (i64, String)> {
+    let name = params
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let arguments = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+
+    let payload = match name.as_str() {
+        "get_server_status" => ping(config).1,
+        "list_downloads" => {
+            let wanted = arguments
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("all");
+            filter_tasks(list_tasks(config).1, wanted)
+        }
+        "get_download" => {
+            let gid = arguments.get("gid").and_then(Value::as_str).unwrap_or_default();
+            if gid.is_empty() {
+                return Err((-32602, "缺少 gid".to_string()));
+            }
+            get_task(config, gid).1
+        }
+        "create_download" => {
+            let bytes = serde_json::to_vec(&arguments)
+                .map_err(|error| (-32602, format!("参数序列化失败: {error}")))?;
+            create_tasks(config, &bytes).1
+        }
+        "control_download" => {
+            let gid = arguments.get("gid").and_then(Value::as_str).unwrap_or_default();
+            if gid.is_empty() {
+                return Err((-32602, "缺少 gid".to_string()));
+            }
+            match arguments
+                .get("action")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+            {
+                "pause" => task_action(config, gid, "aria2.pause").1,
+                "resume" => task_action(config, gid, "aria2.unpause").1,
+                "remove" => remove_task(config, gid).1,
+                other => return Err((-32602, format!("未知 action: {other}"))),
+            }
+        }
+        other => return Err((-32602, format!("未知工具: {other}"))),
+    };
+
+    let is_error = payload.get("ok").and_then(Value::as_bool) == Some(false);
+    Ok(json!({
+        "content": [{ "type": "text", "text": payload.to_string() }],
+        "isError": is_error
+    }))
+}
+
+fn filter_tasks(body: Value, wanted: &str) -> Value {
+    if wanted.is_empty() || wanted == "all" {
+        return body;
+    }
+    let tasks = body
+        .get("tasks")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let filtered: Vec<Value> = tasks
+        .into_iter()
+        .filter(|task| task.get("status").and_then(Value::as_str) == Some(wanted))
+        .collect();
+    json!({ "ok": true, "count": filtered.len(), "tasks": filtered })
 }
 
 fn error_body(code: &str, message: &str) -> Value {

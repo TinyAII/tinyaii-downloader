@@ -154,8 +154,26 @@ export default function ApiPanel() {
             </div>
           </section>
 
-          <section className="rounded-xl border border-dashed border-black/15 px-5 py-4">
-            <span className="text-[13px] text-text-muted">MCP 接入：尚未实现，接入后这里会给出配置片段。</span>
+          <section className="rounded-xl border border-black/10 bg-white p-5">
+            <div className="text-[14px] font-medium text-text-main mb-4">MCP 接入</div>
+            <div className="space-y-4">
+              <div>
+                <pre className="text-[12px] leading-6 font-mono text-text-main bg-black/[0.03] border border-black/5 rounded-lg px-4 py-3 overflow-x-auto whitespace-pre">
+                  {`{
+  "mcpServers": {
+    "tinyaii": {
+      "type": "http",
+      "url": "http://127.0.0.1:${port}/mcp",
+      "headers": { "X-Api-Token": "<上方复制的令牌>" }
+    }
+  }
+}`}
+                </pre>
+                <div className="text-[12px] text-text-muted mt-2">
+                  支持 HTTP 传输的客户端（Claude Code、Cursor 等）可直接连，无需额外进程。
+                </div>
+              </div>
+            </div>
           </section>
 
           {error ? <div className="text-[12px] text-red-600">接口不可用：{error}</div> : null}

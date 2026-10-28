@@ -53,11 +53,14 @@ export default function UpdateModal({ isOpen, updateInfo, onClose }: UpdateModal
     }
   };
 
+  // 强制更新但没给下载地址时，弹窗必须允许关闭，否则用户会被卡死
+  const canDismiss = !updateInfo.forceUpdate || !updateInfo.downloadUrl;
+
   return createPortal(
     <div className="fixed inset-0 z-[90] flex items-center justify-center p-6">
-      <div className="absolute inset-0 bg-black/45 backdrop-blur-sm" onClick={() => (updateInfo.forceUpdate ? null : onClose())} />
+      <div className="absolute inset-0 bg-black/45 backdrop-blur-sm" onClick={() => (canDismiss ? onClose() : null)} />
       <div className="relative w-[42rem] max-w-[92vw] max-h-[85vh] rounded-xl border border-black/10 bg-main shadow-2xl overflow-hidden flex flex-col">
-        {!updateInfo.forceUpdate ? (
+        {canDismiss ? (
           <button
             onClick={onClose}
             className="absolute top-3 right-3 w-8 h-8 rounded-md border border-black/10 hover:bg-black/5 text-text-muted hover:text-text-main transition-colors cursor-pointer z-10"
@@ -86,21 +89,25 @@ export default function UpdateModal({ isOpen, updateInfo, onClose }: UpdateModal
           )}
         </div>
         <div className="px-6 py-4 border-t border-black/5 flex items-center justify-end gap-3">
-          {!updateInfo.forceUpdate ? (
+          {canDismiss ? (
             <button
               onClick={onClose}
               className="h-9 px-4 rounded-md border border-black/10 bg-white hover:bg-black/5 text-[13px] text-text-main transition-colors cursor-pointer"
             >
-              稍后再说
+              {updateInfo.forceUpdate ? '关闭' : '稍后再说'}
             </button>
           ) : null}
-          <button
-            onClick={() => void handleOpenDownload()}
-            className="h-9 px-4 rounded-md border border-[#e5a038] bg-[#e5a038] hover:bg-[#d49028] text-white text-[13px] transition-colors cursor-pointer inline-flex items-center gap-1.5"
-          >
-            <ExternalLink size={14} />
-            立即更新
-          </button>
+          {updateInfo.downloadUrl ? (
+            <button
+              onClick={() => void handleOpenDownload()}
+              className="h-9 px-4 rounded-md border border-[#e5a038] bg-[#e5a038] hover:bg-[#d49028] text-white text-[13px] transition-colors cursor-pointer inline-flex items-center gap-1.5"
+            >
+              <ExternalLink size={14} />
+              立即更新
+            </button>
+          ) : (
+            <span className="text-[12px] text-text-muted">该版本未提供下载地址，请前往发布页获取</span>
+          )}
         </div>
       </div>
     </div>,
