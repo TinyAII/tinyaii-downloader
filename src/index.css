@@ -1,0 +1,102 @@
+@import "tailwindcss";
+
+:root {
+  --surface-sidebar: #e8e6df;
+  --surface-task-sidebar: #f5f4ef;
+  --surface-main: #fcfcfc;
+  --accent-primary: #eab308;
+  --accent-primary-hover: #ca8a04;
+  --text-primary: #333333;
+  --text-secondary: #888888;
+}
+
+@theme {
+  --color-sidebar: var(--surface-sidebar);
+  --color-task-sidebar: var(--surface-task-sidebar);
+  --color-main: var(--surface-main);
+  --color-primary: var(--accent-primary);
+  --color-primary-hover: var(--accent-primary-hover);
+  --color-text-main: var(--text-primary);
+  --color-text-muted: var(--text-secondary);
+}
+
+:root[data-theme='dark'] {
+  --surface-sidebar: #111827;
+  --surface-task-sidebar: #1f2937;
+  --surface-main: #0f172a;
+  --accent-primary: #f59e0b;
+  --accent-primary-hover: #d97706;
+  --text-primary: #e5e7eb;
+  --text-secondary: #94a3b8;
+}
+
+:root.theme-animating *,
+:root.theme-animating *::before,
+:root.theme-animating *::after {
+  transition: background-color 220ms ease, border-color 220ms ease, color 220ms ease, fill 220ms ease, stroke 220ms ease;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  color: var(--color-text-main);
+  background-color: var(--color-main);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* 隐藏滚动条但保留功能 */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background-color: rgba(0, 0, 0, 0.1);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(0, 0, 0, 0.2);
+}
+
+.window-drag {
+  -webkit-app-region: drag;
+}
+
+.no-drag {
+  -webkit-app-region: no-drag;
+}
+
+.text-gold-wave {
+  background-image: linear-gradient(
+    110deg,
+    #8f6100 0%,
+    #f8d678 16%,
+    #b8860b 30%,
+    #fff2b8 44%,
+    #c98a00 58%,
+    #f1c55a 72%,
+    #9b6a00 86%,
+    #ffeb9b 100%
+  );
+  background-size: 240% 100%;
+  animation: gold-wave-flow 5.2s ease-in-out infinite;
+}
+
+@keyframes gold-wave-flow {
+  0% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0% 50%;
+  }
+}
