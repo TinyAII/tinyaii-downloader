@@ -7,10 +7,12 @@ const ENDPOINTS = [
   { method: 'GET', path: '/api/v1/ping', desc: '服务信息与引擎在线状态' },
   { method: 'GET', path: '/api/v1/tasks', desc: '任务列表' },
   { method: 'GET', path: '/api/v1/tasks/{gid}', desc: '单个任务详情' },
-  { method: 'POST', path: '/api/v1/tasks', desc: '新建下载任务（直链）' },
+  { method: 'POST', path: '/api/v1/tasks', desc: '新建任务（直链，支持 savePath / 限速 / checksum）' },
   { method: 'POST', path: '/api/v1/tasks/{gid}/pause', desc: '暂停' },
   { method: 'POST', path: '/api/v1/tasks/{gid}/resume', desc: '继续' },
-  { method: 'POST', path: '/api/v1/tasks/{gid}/remove', desc: '删除记录' },
+  { method: 'POST', path: '/api/v1/tasks/{gid}/remove', desc: '删除任务记录（不删磁盘文件）' },
+  { method: 'GET', path: '/api/v1/config', desc: '引擎配置快照（只读）' },
+  { method: 'POST', path: '/api/v1/config/speed', desc: '设置全局限速' },
 ];
 
 export default function ApiPanel() {
@@ -128,6 +130,10 @@ export default function ApiPanel() {
                   <span className="text-[12px] text-text-muted">{endpoint.desc}</span>
                 </div>
               ))}
+            </div>
+            <div className="text-[12px] text-text-muted mt-4 leading-relaxed">
+              状态值：downloading / seeding / paused / completed / failed / stopped。
+              createdAt 与 completedAt 是运行时记录，重启后会重新计时，别拿它做精确统计。
             </div>
           </section>
 

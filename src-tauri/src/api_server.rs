@@ -148,11 +148,13 @@ fn handle_stream(mut stream: TcpStream, shared: Arc<ApiShared>) {
     let response = match (request.method.as_str(), segments.as_slice()) {
         ("GET", ["api", "v1", "ping"]) => ping(&config),
         ("GET", ["api", "v1", "tasks"]) => list_tasks(&config),
-        ("GET", ["api", "v1", "tasks", id]) => get_task(&config, id),
+        ("GET", ["api", "v1", "tasks", id]) => get_task(&config, id.trim()),
         ("POST", ["api", "v1", "tasks"]) => create_tasks(&config, &request.body),
-        ("POST", ["api", "v1", "tasks", id, "pause"]) => task_action(&config, id, "aria2.pause"),
-        ("POST", ["api", "v1", "tasks", id, "resume"]) => task_action(&config, id, "aria2.unpause"),
-        ("POST", ["api", "v1", "tasks", id, "remove"]) => remove_task(&config, id),
+        ("POST", ["api", "v1", "tasks", id, "pause"]) => task_action(&config, id.trim(), "aria2.pause"),
+        ("POST", ["api", "v1", "tasks", id, "resume"]) => task_action(&config, id.trim(), "aria2.unpause"),
+        ("POST", ["api", "v1", "tasks", id, "remove"]) => remove_task(&config, id.trim()),
+        ("GET", ["api", "v1", "config"]) => get_config(&config),
+        ("POST", ["api", "v1", "config", "speed"]) => set_global_speed_limit(&config, &request.body),
         ("POST", ["mcp"]) => mcp_handle(&config, &request.body),
         _ => (404, error_body("not_found", "接口不存在")),
     };
@@ -220,18 +222,50 @@ fn get_task(config: &Aria2RpcConfig, gid: &str) -> (u16, Value) {
     }
 }
 
+// 兼容 "url":"一个链接" 和 "links":["多个链接"] 两种写法
+fn one_or_many<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    match OneOrMany::deserialize(deserializer)? {
+        OneOrMany::One(value) => Ok(vec![value]),
+        OneOrMany::Many(values) => Ok(values),
+    }
+}
+
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ApiCreateTaskRequest {
+    #[serde(
+        default,
+        alias = "url",
+        alias = "urls",
+        alias = "link",
+        deserialize_with = "one_or_many"
+    )]
     links: Vec<String>,
-    #[serde(default)]
+    #[serde(default, alias = "dir", alias = "path", alias = "dst", alias = "out")]
     save_path: String,
-    #[serde(default)]
+    #[serde(default, alias = "name", alias = "filename")]
     rename: String,
-    #[serde(default)]
+    #[serde(default, alias = "split")]
     split_count: Option<u32>,
-    #[serde(default)]
+    #[serde(default, alias = "maxConnectionPerServer")]
     max_connections_per_server: Option<u32>,
+    #[serde(default)]
+    checksum: String,
+    #[serde(default, alias = "maxDownloadSpeed")]
+    max_download_limit: Option<u64>,
+    #[serde(default, alias = "maxUploadSpeed")]
+    max_upload_limit: Option<u64>,
+    #[serde(default)]
+    lowest_speed_limit: Option<u64>,
     #[serde(default)]
     user_agent: String,
     #[serde(default)]
@@ -258,10 +292,13 @@ fn create_tasks(config: &Aria2RpcConfig, body: &[u8]) -> (u16, Value) {
     let request: ApiCreateTaskRequest = match serde_json::from_slice(body) {
         Ok(value) => value,
         Err(error) => {
-            return (
-                400,
-                error_body("invalid_json", &format!("请求体解析失败: {error}")),
-            )
+            let message = error.to_string();
+            let code = if message.contains("unknown field") {
+                "unknown_field"
+            } else {
+                "invalid_json"
+            };
+            return (400, error_body(code, &format!("请求体解析失败: {message}")));
         }
     };
     if request.links.is_empty() {
@@ -281,6 +318,10 @@ fn create_tasks(config: &Aria2RpcConfig, body: &[u8]) -> (u16, Value) {
         } else {
             request.save_path
         },
+        checksum: request.checksum,
+        max_download_limit: request.max_download_limit.unwrap_or(0),
+        max_upload_limit: request.max_upload_limit.unwrap_or(0),
+        lowest_speed_limit: request.lowest_speed_limit.unwrap_or(0),
         advanced: TaskAdvancedOptions {
             user_agent: request.user_agent,
             authorization: request.authorization,
@@ -509,6 +550,97 @@ fn filter_tasks(body: Value, wanted: &str) -> Value {
         .filter(|task| task.get("status").and_then(Value::as_str) == Some(wanted))
         .collect();
     json!({ "ok": true, "count": filtered.len(), "tasks": filtered })
+}
+
+fn get_config(config: &Aria2RpcConfig) -> (u16, Value) {
+    let config = config.clone();
+    let result: Result<Value, String> = tauri::async_runtime::block_on(async move {
+        let client = reqwest::Client::new();
+        rpc_call::<Value>(&client, &config, "aria2.getGlobalOption", vec![]).await
+    });
+    match result {
+        Ok(value) => (
+            200,
+            json!({
+                "ok": true,
+                "config": {
+                    "downloadDir": value.get("dir").cloned().unwrap_or(Value::Null),
+                    "maxOverallDownloadLimit": value.get("max-overall-download-limit").cloned().unwrap_or(Value::Null),
+                    "maxOverallUploadLimit": value.get("max-overall-upload-limit").cloned().unwrap_or(Value::Null),
+                    "lowestSpeedLimit": value.get("lowest-speed-limit").cloned().unwrap_or(Value::Null),
+                    "maxConcurrentDownloads": value.get("max-concurrent-downloads").cloned().unwrap_or(Value::Null)
+                },
+                "note": "下载目录与并发数由客户端设置管理，这里只读"
+            }),
+        ),
+        Err(message) => (502, error_body("engine_unavailable", &message)),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ApiSpeedLimitRequest {
+    #[serde(default)]
+    max_download_limit: Option<u64>,
+    #[serde(default)]
+    max_upload_limit: Option<u64>,
+    #[serde(default)]
+    lowest_speed_limit: Option<u64>,
+}
+
+fn set_global_speed_limit(config: &Aria2RpcConfig, body: &[u8]) -> (u16, Value) {
+    let request: ApiSpeedLimitRequest = match serde_json::from_slice(body) {
+        Ok(value) => value,
+        Err(error) => {
+            return (
+                400,
+                error_body("invalid_json", &format!("请求体解析失败: {error}")),
+            )
+        }
+    };
+
+    let mut options = serde_json::Map::new();
+    if let Some(value) = request.max_download_limit {
+        options.insert(
+            "max-overall-download-limit".to_string(),
+            json!(value.to_string()),
+        );
+    }
+    if let Some(value) = request.max_upload_limit {
+        options.insert(
+            "max-overall-upload-limit".to_string(),
+            json!(value.to_string()),
+        );
+    }
+    if let Some(value) = request.lowest_speed_limit {
+        options.insert("lowest-speed-limit".to_string(), json!(value.to_string()));
+    }
+    if options.is_empty() {
+        return (
+            400,
+            error_body(
+                "invalid_request",
+                "至少要给一个限速字段（maxDownloadLimit / maxUploadLimit / lowestSpeedLimit），0 表示不限速",
+            ),
+        );
+    }
+
+    let applied = Value::Object(options.clone());
+    let config = config.clone();
+    let result: Result<String, String> = tauri::async_runtime::block_on(async move {
+        let client = reqwest::Client::new();
+        rpc_call::<String>(
+            &client,
+            &config,
+            "aria2.changeGlobalOption",
+            vec![Value::Object(options)],
+        )
+        .await
+    });
+    match result {
+        Ok(_) => (200, json!({ "ok": true, "applied": applied })),
+        Err(message) => (502, error_body("engine_error", &message)),
+    }
 }
 
 fn error_body(code: &str, message: &str) -> Value {

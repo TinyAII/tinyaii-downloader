@@ -30,13 +30,18 @@ struct Aria2RpcConfig {
     aria2_executable_path: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TaskAdvancedOptions {
+    #[serde(default)]
     user_agent: String,
+    #[serde(default)]
     authorization: String,
+    #[serde(default)]
     referer: String,
+    #[serde(default)]
     cookie: String,
+    #[serde(default)]
     proxy: String,
 }
 
@@ -64,15 +69,28 @@ struct TorrentFilePayload {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CreateTaskPayload {
+    #[serde(default, alias = "url", alias = "urls", alias = "link")]
     links: Vec<String>,
     #[serde(default)]
     torrent_files: Vec<TorrentFilePayload>,
+    #[serde(default, alias = "name", alias = "filename")]
     rename: String,
+    #[serde(default, alias = "split")]
     split_count: u32,
-    #[serde(alias = "maxConnectionsPerServer")]
+    #[serde(default, alias = "maxConnectionsPerServer")]
     max_connection_per_server: u32,
+    #[serde(default, alias = "dir", alias = "path", alias = "dst", alias = "out")]
     save_path: String,
+    #[serde(default)]
     advanced: TaskAdvancedOptions,
+    #[serde(default)]
+    checksum: String,
+    #[serde(default)]
+    max_download_limit: u64,
+    #[serde(default)]
+    max_upload_limit: u64,
+    #[serde(default)]
+    lowest_speed_limit: u64,
     #[serde(default)]
     bt_options: Option<TaskBtOptions>,
 }
@@ -1283,6 +1301,50 @@ fn map_status(status: &Aria2Status) -> String {
     }
 }
 
+#[derive(Debug, Clone)]
+struct TaskTimes {
+    created_at: u64,
+    completed_at: Option<u64>,
+}
+
+// aria2 不提供创建/完成时间，只能按"首次观察到"记录；编造时间比留空更糟
+static TASK_TIMES: std::sync::OnceLock<std::sync::Mutex<HashMap<String, TaskTimes>>> =
+    std::sync::OnceLock::new();
+
+fn record_task_times(gid: &str, status_text: &str) -> TaskTimes {
+    let now = now_millis();
+    let mut map = match TASK_TIMES
+        .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+        .lock()
+    {
+        Ok(guard) => guard,
+        Err(_) => {
+            return TaskTimes {
+                created_at: now,
+                completed_at: None,
+            }
+        }
+    };
+    if map.len() > 4000 {
+        map.clear();
+    }
+    let entry = map.entry(gid.to_string()).or_insert(TaskTimes {
+        created_at: now,
+        completed_at: None,
+    });
+    if entry.created_at == 0 {
+        entry.created_at = now;
+    }
+    if status_text == "completed" {
+        if entry.completed_at.is_none() {
+            entry.completed_at = Some(now);
+        }
+    } else {
+        entry.completed_at = None;
+    }
+    entry.clone()
+}
+
 fn map_task(status: Aria2Status) -> DownloadTaskDto {
     let source_type = source_type_from_status(&status);
     let file_path = status
@@ -1316,17 +1378,7 @@ fn map_task(status: Aria2Status) -> DownloadTaskDto {
         .as_ref()
         .and_then(|value| value.parse::<u32>().ok())
         .unwrap_or(1);
-    let completed_at = if status_text == "completed" {
-        Some(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|item| item.as_millis() as u64)
-                .unwrap_or(0),
-        )
-    } else {
-        None
-    };
-
+    let times = record_task_times(&status.gid, &status_text);
     let bitfield = status.bitfield.unwrap_or_default();
     let piece_length = status.piece_length.as_deref().map(parse_u64).unwrap_or(0);
     let connections = status.connections.as_deref().and_then(|c| c.parse::<u32>().ok()).unwrap_or(0);
@@ -1357,8 +1409,8 @@ fn map_task(status: Aria2Status) -> DownloadTaskDto {
         downloaded_bytes,
         speed_bytes,
         upload_speed_bytes: status.upload_speed.as_deref().map(parse_u64).unwrap_or(0),
-        created_at: 0,
-        completed_at,
+        created_at: times.created_at,
+        completed_at: times.completed_at,
         bitfield,
         piece_length,
         connections,
@@ -1905,18 +1957,6 @@ async fn tell_statuses(client: &Client, config: &Aria2RpcConfig) -> Result<Vec<A
 async fn aria2_add_tasks(request: AddTasksRequest) -> Result<Vec<DownloadTaskDto>, String> {
     let client = Client::new();
     ensure_engine_online(&client, &request.config).await?;
-    let unrestricted_global_options = json!({
-        "max-overall-upload-limit": "0",
-        "max-overall-download-limit": "0",
-        "lowest-speed-limit": "0"
-    });
-    let _: String = rpc_call(
-        &client,
-        &request.config,
-        "aria2.changeGlobalOption",
-        vec![unrestricted_global_options],
-    )
-    .await?;
     let validated = validate_task_parameters(&request.payload)?;
     fs::create_dir_all(&validated.save_path).map_err(|error| format!("创建存储目录失败: {error}"))?;
 
@@ -1933,8 +1973,18 @@ async fn aria2_add_tasks(request: AddTasksRequest) -> Result<Vec<DownloadTaskDto
             json!(validated.max_connection_per_server.to_string()),
         );
         options.insert("min-split-size".to_string(), json!("1K"));
-        options.insert("max-download-limit".to_string(), json!("0"));
-        options.insert("lowest-speed-limit".to_string(), json!("0"));
+        options.insert(
+            "max-download-limit".to_string(),
+            json!(request.payload.max_download_limit.to_string()),
+        );
+        options.insert(
+            "max-upload-limit".to_string(),
+            json!(request.payload.max_upload_limit.to_string()),
+        );
+        options.insert(
+            "lowest-speed-limit".to_string(),
+            json!(request.payload.lowest_speed_limit.to_string()),
+        );
         options.insert("max-tries".to_string(), json!("10"));
         options.insert("retry-wait".to_string(), json!("1"));
         options.insert("retry-on-400".to_string(), json!("true"));
@@ -1971,6 +2021,12 @@ async fn aria2_add_tasks(request: AddTasksRequest) -> Result<Vec<DownloadTaskDto
         let headers = build_headers(&request.payload.advanced);
         if !headers.is_empty() {
             options.insert("header".to_string(), json!(headers));
+        }
+        if !request.payload.checksum.trim().is_empty() {
+            options.insert(
+                "checksum".to_string(),
+                json!(request.payload.checksum.trim().to_string()),
+            );
         }
         if let Some(bt_options) = &request.payload.bt_options {
             let seed_ratio = if bt_options.keep_seeding {
@@ -2787,12 +2843,17 @@ async fn aria2_remove_task(
     let client = Client::new();
     let forced_remove: Result<String, String> =
         rpc_call(&client, &config, "aria2.forceRemove", vec![json!(task_id.clone())]).await;
-    if forced_remove.is_err() {
-        let removed: Result<String, String> =
-            rpc_call(&client, &config, "aria2.removeDownloadResult", vec![json!(task_id.clone())]).await;
-        if removed.is_err() {
-            let _: String = rpc_call(&client, &config, "aria2.remove", vec![json!(task_id)]).await?;
-        }
+    // forceRemove 只停掉活跃任务，条目仍留在 stopped 列表里；
+    // 必须再调 removeDownloadResult，否则客户端要删两遍才看不到（竞态）
+    let removed_result: Result<String, String> = rpc_call(
+        &client,
+        &config,
+        "aria2.removeDownloadResult",
+        vec![json!(task_id.clone())],
+    )
+    .await;
+    if forced_remove.is_err() && removed_result.is_err() {
+        let _: String = rpc_call(&client, &config, "aria2.remove", vec![json!(task_id)]).await?;
     }
     let delete_targets = if delete_downloaded_files.unwrap_or(false) {
         downloaded_file_paths.unwrap_or_default()
