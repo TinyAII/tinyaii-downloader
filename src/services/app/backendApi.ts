@@ -32,8 +32,11 @@ async function resolveVersion() {
       return version.trim();
     }
   } catch (_error) {
+    // 读不到就让调用方跳过检查
   }
-  return '1.0.0';
+  // 不能用固定版本兜底：曾经写死 1.0.0，读失败时客户端会把自己当旧版本，
+  // 于是每次启动都提示更新，装完仍然提示
+  return '';
 }
 
 // 走 Rust 侧请求：BumpAPI 没有返回 CORS 头，webview 里的 fetch 会被浏览器拦掉
@@ -64,6 +67,9 @@ async function fetchCheck(currentVersion: string) {
 
 export async function checkVersionUpdate() {
   const currentVersion = await resolveVersion();
+  if (!currentVersion) {
+    throw new Error('无法读取当前版本号，已跳过更新检查');
+  }
   const data = await fetchCheck(currentVersion);
   return {
     hasUpdate: Boolean(data.has_update),
