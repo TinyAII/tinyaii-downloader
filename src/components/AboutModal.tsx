@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { openUrl } from '@tauri-apps/plugin-opener';
-import { X, HelpCircle, Rocket, Copy, RefreshCw } from 'lucide-react';
+import { X, HelpCircle, Rocket, Copy, RefreshCw, Check } from 'lucide-react';
 import { aria2GetEngineStatus } from '../services/download/aria2RpcEngine';
+import { getVersion } from '@tauri-apps/api/app';
 
 interface AboutModalProps {
   isOpen: boolean;
@@ -17,6 +18,33 @@ export default function AboutModal({ isOpen, onClose }: AboutModalProps) {
   const [aria2Version, setAria2Version] = useState('加载中...');
   const [features, setFeatures] = useState<string[]>([]);
   const [refreshing, setRefreshing] = useState(false);
+  const [appVersion, setAppVersion] = useState('');
+  const [versionCopied, setVersionCopied] = useState(false);
+
+  useEffect(() => {
+    let canceled = false;
+    getVersion()
+      .then((version) => {
+        if (!canceled) setAppVersion(version);
+      })
+      .catch(() => {
+        if (!canceled) setAppVersion('未知');
+      });
+    return () => {
+      canceled = true;
+    };
+  }, []);
+
+  const copyVersion = async () => {
+    if (!appVersion) return;
+    try {
+      await navigator.clipboard.writeText(appVersion);
+      setVersionCopied(true);
+      window.setTimeout(() => setVersionCopied(false), 1600);
+    } catch (_error) {
+      setVersionCopied(false);
+    }
+  };
 
   const loadEngineStatus = async (forceRefresh: boolean) => {
     try {
@@ -77,11 +105,11 @@ export default function AboutModal({ isOpen, onClose }: AboutModalProps) {
 
         <div className="flex-1 overflow-y-auto custom-scrollbar p-8 flex flex-col items-center">
           {/* Logo */}
-          <div className="w-24 h-24 bg-gradient-to-br from-gray-800 to-gray-900 rounded-2xl flex items-center justify-center shadow-lg border border-white/10 mb-6">
-            <span className="font-black text-2xl tracking-wider text-primary">
-              TinyAii
-            </span>
-          </div>
+          <img
+            src="/app-logo.png"
+            alt="TinyAii"
+            className="w-24 h-24 rounded-2xl shadow-lg border border-black/10 mb-6 object-cover"
+          />
 
           {/* Title */}
           <h2 className="text-2xl font-bold text-text-main mb-6 flex items-center gap-2">
@@ -100,8 +128,20 @@ export default function AboutModal({ isOpen, onClose }: AboutModalProps) {
             <div className="flex items-center justify-between px-4 py-2.5 bg-white border border-black/10 rounded-lg">
               <span className="text-[13px] text-text-main font-mono">TinyAii 版本</span>
               <div className="flex items-center gap-2">
-                <span className="text-[13px] font-bold text-text-main">v1.0.0</span>
-                <button className="text-text-muted hover:text-text-main cursor-pointer"><Copy size={14} /></button>
+                <span className="text-[13px] font-bold text-text-main">
+                  {appVersion ? `v${appVersion}` : '读取中...'}
+                </span>
+                <button
+                  onClick={() => void copyVersion()}
+                  title="复制版本号"
+                  className="text-text-muted hover:text-text-main cursor-pointer"
+                >
+                  {versionCopied ? (
+                    <Check size={14} strokeWidth={2.5} className="text-emerald-600" />
+                  ) : (
+                    <Copy size={14} />
+                  )}
+                </button>
               </div>
             </div>
             <div className="flex items-center justify-between px-4 py-2.5 bg-white border border-black/10 rounded-lg">

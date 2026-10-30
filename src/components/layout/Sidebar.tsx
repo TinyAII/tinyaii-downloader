@@ -12,10 +12,8 @@ export default function Sidebar({ onNewTask, onOpenAbout }: SidebarProps) {
 
   return (
     <div className="w-16 h-screen flex flex-col items-center py-6 bg-sidebar border-r border-black/5 select-none">
-      {/* Logo Placeholder */}
-      <div className="mb-8 font-black text-[10px] tracking-wider text-primary">
-        TinyAii
-      </div>
+      {/* Logo */}
+      <img src="/app-logo.png" alt="TinyAii" className="w-9 h-9 rounded-lg mb-8" />
 
       {/* Top Actions */}
       <div className="flex flex-col gap-4 flex-1">
