@@ -94,6 +94,8 @@ export const advancedSettingsKeys: readonly (keyof AdvancedSettingsValues)[] = [
   'proxyUsername',
   'proxyPassword',
   'proxyBypass',
+  'githubMirrorId',
+  'githubMirrorList',
   'trackerSource',
   'trackerList',
   'trackerLocalDirs',
@@ -158,6 +160,31 @@ export const migrateBasicSettings = (persisted: unknown, defaults: BasicSettings
   };
 };
 
+// 这些默认镜像已失效，迁移时直接从用户列表里摘掉
+const RETIRED_MIRROR_IDS = new Set(['ghproxynet']);
+
+const mergeGithubMirrorList = (
+  persistedList: unknown,
+  defaults: AdvancedSettingsValues
+): AdvancedSettingsValues['githubMirrorList'] => {
+  const defaultList = defaults.githubMirrorList;
+  if (!Array.isArray(persistedList)) {
+    return defaultList;
+  }
+  const kept = persistedList
+    .filter((item): item is { id: string, label: string, prefix: string } =>
+      isRecord(item) && typeof item.id === 'string' && typeof item.prefix === 'string'
+    )
+    .filter((item) => !RETIRED_MIRROR_IDS.has(item.id))
+    .map((item) => ({
+      id: item.id,
+      label: typeof item.label === 'string' ? item.label : item.prefix,
+      prefix: item.prefix,
+    }));
+  const missing = defaultList.filter((preset) => !kept.some((item) => item.id === preset.id));
+  return [...kept, ...missing];
+};
+
 export const migrateAdvancedSettings = (
   persisted: unknown,
   defaults: AdvancedSettingsValues
@@ -165,8 +192,12 @@ export const migrateAdvancedSettings = (
   if (!isRecord(persisted)) {
     return defaults;
   }
-  return {
+  const merged = {
     ...defaults,
     ...(pickKeys(persisted, advancedSettingsKeys) as Partial<AdvancedSettingsValues>),
+  };
+  return {
+    ...merged,
+    githubMirrorList: mergeGithubMirrorList(merged.githubMirrorList, defaults),
   };
 };

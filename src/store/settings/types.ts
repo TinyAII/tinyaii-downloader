@@ -41,6 +41,12 @@ export interface BasicSettingsValues {
   reconnectSpeedThresholdKB: number;
 }
 
+export interface GithubMirrorEntry {
+  id: string;
+  label: string;
+  prefix: string;
+}
+
 export interface AdvancedSettingsValues {
   useProxy: boolean;
   proxyProtocol: 'http' | 'https' | 'socks5';
@@ -49,6 +55,9 @@ export interface AdvancedSettingsValues {
   proxyUsername: string;
   proxyPassword: string;
   proxyBypass: string;
+  // GitHub 加速：当前选中的镜像 id（'direct' 表示直连）与可编辑列表
+  githubMirrorId: string;
+  githubMirrorList: GithubMirrorEntry[];
   trackerSource: string;
   trackerList: string;
   trackerLocalDirs: string;

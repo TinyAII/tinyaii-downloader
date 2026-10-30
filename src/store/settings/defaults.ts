@@ -45,6 +45,13 @@ export const advancedSettingsDefaults: AdvancedSettingsValues = {
   proxyUsername: '',
   proxyPassword: '',
   proxyBypass: 'localhost,127.0.0.1,::1',
+  githubMirrorId: 'direct',
+  githubMirrorList: [
+    { id: 'direct', label: '直连 GitHub', prefix: '' },
+    { id: 'ghproxy', label: 'gh-proxy.com', prefix: 'https://gh-proxy.com/' },
+    { id: 'dpik', label: 'gh.dpik.top', prefix: 'https://gh.dpik.top/' },
+    { id: 'akaere', label: 'cdn.akaere.online', prefix: 'https://cdn.akaere.online/' },
+  ],
   trackerSource: 'trackers_best.txt',
   trackerList: 'udp://tracker.opentrackr.org:1337/announce\nudp://open.demonii.com:1337/announce\nudp://open.stealth.si:80/announce\nhttps://torrent.tracker.durukanbal.com:443/announce\nudp://wepzone.net:6969/announce\nudp://tracker.wepzone.net:6969/announce\nudp://tracker.torrent.eu.org:451/announce\nudp://tracker.theoks.net:6969/announce',
   trackerLocalDirs: '',

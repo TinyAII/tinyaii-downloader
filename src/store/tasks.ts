@@ -18,6 +18,7 @@ import { resolverPlugins } from '../services/resolver/registry';
 import { useBasicSettingsStore } from './settings/basicStore';
 import { useAdvancedSettingsStore } from './settings/advancedStore';
 import { useResolverAuthStore } from './resolverAuth';
+import { applyGithubMirror, resolveMirror } from '../utils/githubMirror';
 import { writeDeveloperLog } from './developerLogStore';
 import type { CreateTaskPayload, DownloadTask } from '../types/task';
 import { buildRetryTaskPayload, type TaskRemoveRequest } from '../utils/taskActions';
@@ -25,7 +26,7 @@ import { buildRetryTaskPayload, type TaskRemoveRequest } from '../utils/taskActi
 interface TaskState {
   tasks: DownloadTask[];
   bootRuntime: () => void;
-  createTasks: (payload: CreateTaskPayload) => Promise<number>;
+  createTasks: (payload: CreateTaskPayload, mirrorPrefixOverride?: string | null) => Promise<number>;
   refreshTasks: () => Promise<void>;
   startTask: (taskId: string) => Promise<void>;
   retryTask: (taskId: string) => Promise<boolean>;
@@ -137,7 +138,7 @@ export const useTaskStore = create<TaskState>()(
         ensureRuntime(get().refreshTasks);
         void get().refreshTasks();
       },
-      createTasks: async (payload) => {
+      createTasks: async (payload, mirrorPrefixOverride) => {
         try {
           const normalizedPayload = withDefaultBtOptions(payload);
           const { payload: resolvedPayload, appliedPlugins } = await resolveTaskPayloadByPlugins(
@@ -157,7 +158,34 @@ export const useTaskStore = create<TaskState>()(
               }),
             });
           }
-          const created = await aria2CreateTasks(resolvedPayload);
+          const { githubMirrorId, githubMirrorList } = useAdvancedSettingsStore.getState();
+          const settingsMirror = resolveMirror(githubMirrorList, githubMirrorId);
+          // undefined = 跟随设置；null / 空串 = 本次任务强制直连；其它 = 本次任务指定前缀
+          const effectivePrefix =
+            mirrorPrefixOverride === undefined ? settingsMirror.prefix : mirrorPrefixOverride ?? '';
+          const effectiveLabel =
+            mirrorPrefixOverride === undefined ? settingsMirror.label : '本次任务指定';
+          const mirroredLinks = effectivePrefix
+            ? resolvedPayload.links.map((link) => applyGithubMirror(link, effectivePrefix))
+            : resolvedPayload.links;
+          const mirrorApplied = mirroredLinks.some(
+            (link, index) => link !== resolvedPayload.links[index]
+          );
+          if (mirrorApplied) {
+            writeDeveloperLog({
+              source: 'task-store',
+              action: 'apply_github_mirror',
+              level: 'info',
+              message: `已通过加速地址建立任务：${effectiveLabel}`,
+              details: JSON.stringify({
+                prefix: effectivePrefix,
+                count: mirroredLinks.length,
+              }),
+            });
+          }
+          const created = await aria2CreateTasks(
+            mirrorApplied ? { ...resolvedPayload, links: mirroredLinks } : resolvedPayload
+          );
           if (!created.length) return 0;
           // 为解析插件产生的任务补充元信息：插件 id、是否鉴权链接、原始分享链接
           // 这些字段用于运行中 token 过期时刷新链接

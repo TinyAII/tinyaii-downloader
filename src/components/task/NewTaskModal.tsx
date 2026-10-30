@@ -5,6 +5,8 @@ import { cn } from '../../utils/cn';
 import { writeDeveloperLog } from '../../store/developerLogStore';
 import { useBasicSettingsStore } from '../../store/settings/basicStore';
 import { useAdvancedSettingsStore } from '../../store/settings/advancedStore';
+import { Select } from '../ui/Select';
+import { resolveMirror } from '../../utils/githubMirror';
 import { appGetInstallDir, aria2GetTaskOptionConstraints } from '../../services/download/aria2RpcEngine';
 import { formatBytes } from '../../utils/format';
 import { getTorrentContentSizeFromBytes } from '../../utils/torrentMeta';
@@ -22,7 +24,7 @@ import type { CreateTaskPayload, TorrentFilePayload } from '../../types/task';
 interface NewTaskModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onCreateTasks: (payload: CreateTaskPayload) => Promise<number>;
+  onCreateTasks: (payload: CreateTaskPayload, mirrorPrefix?: string | null) => Promise<number>;
 }
 
 type TabType = 'link' | 'torrent';
@@ -90,6 +92,10 @@ export default function NewTaskModal({ isOpen, onClose, onCreateTasks }: NewTask
   const [cookie, setCookie] = useState('');
   const [proxy, setProxy] = useState('');
   const [enableBtOverride, setEnableBtOverride] = useState(false);
+  const [useGithubMirror, setUseGithubMirror] = useState(false);
+  const [taskMirrorId, setTaskMirrorId] = useState('');
+  const githubMirrorList = useAdvancedSettingsStore((state) => state.githubMirrorList);
+  const usableMirrors = githubMirrorList.filter((item) => item.prefix);
   const [taskAutoDownloadTorrent, setTaskAutoDownloadTorrent] = useState(() => autoDownloadTorrentSetting);
   const [taskForceEncrypt, setTaskForceEncrypt] = useState(() => forceEncryptSetting);
   const [taskKeepSeeding, setTaskKeepSeeding] = useState(() => keepSeedingSetting);
@@ -181,6 +187,14 @@ export default function NewTaskModal({ isOpen, onClose, onCreateTasks }: NewTask
     setTaskSeedTimeMinutes(seedTimeMinutesSetting);
     setEnableBtOverride(false);
     setInheritGlobalUserAgent(true);
+    {
+      const advanced = useAdvancedSettingsStore.getState();
+      const current = resolveMirror(advanced.githubMirrorList, advanced.githubMirrorId);
+      setUseGithubMirror(Boolean(current.prefix));
+      setTaskMirrorId(
+        current.prefix ? current.id : advanced.githubMirrorList.find((item) => item.prefix)?.id ?? ''
+      );
+    }
     setUserAgent('');
   }, [
     isOpen,
@@ -290,7 +304,11 @@ export default function NewTaskModal({ isOpen, onClose, onCreateTasks }: NewTask
 
     setSubmitting(true);
     try {
-      const createdCount = await onCreateTasks(payload);
+      const selectedMirror = usableMirrors.find((item) => item.id === taskMirrorId);
+      const createdCount = await onCreateTasks(
+        payload,
+        useGithubMirror ? selectedMirror?.prefix ?? '' : null
+      );
       if (createdCount <= 0) {
         setSubmitError('添加任务失败，请检查引擎连接与鉴权配置');
       }
@@ -538,7 +556,46 @@ export default function NewTaskModal({ isOpen, onClose, onCreateTasks }: NewTask
               </div>
             </div>
           </div>
-          <div className="mt-2 pl-[68px] text-[12px] text-text-muted">
+          {usableMirrors.length > 0 && (
+            <div className="mt-4 flex min-h-9 items-center gap-3">
+              <span className="text-[13px] text-text-main shrink-0 w-14 text-right">加速:</span>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <div
+                  className={cn(
+                    'w-4 h-4 rounded-sm border flex items-center justify-center transition-colors',
+                    useGithubMirror ? 'bg-primary border-primary' : 'border-black/20 bg-white'
+                  )}
+                >
+                  {useGithubMirror && (
+                    <div
+                      className="w-2 h-2 bg-white rounded-sm"
+                      style={{
+                        clipPath:
+                          'polygon(14% 44%, 0 65%, 50% 100%, 100% 16%, 80% 0%, 43% 62%)',
+                      }}
+                    />
+                  )}
+                </div>
+                <input
+                  type="checkbox"
+                  className="hidden"
+                  checked={useGithubMirror}
+                  onChange={(event) => setUseGithubMirror(event.target.checked)}
+                />
+                <span className="text-[13px] text-text-main">GitHub 加速</span>
+              </label>
+              {useGithubMirror && (
+                <Select
+                  value={taskMirrorId}
+                  onChange={setTaskMirrorId}
+                  options={usableMirrors.map((item) => ({ label: item.label, value: item.id }))}
+                  className="w-48"
+                />
+              )}
+              <span className="text-[12px] text-text-muted">仅本次任务，不改设置</span>
+            </div>
+          )}
+          <div className="mt-3 pl-[68px] text-[12px] text-text-muted">
             当前将使用：分片 {effectiveSplitCount}，单服务器连接 {effectiveMaxConnectionsPerServer}
           </div>
           {submitError ? <div className="mt-2 pl-[68px] text-[12px] text-red-500">{submitError}</div> : null}

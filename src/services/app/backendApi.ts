@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 
 const API_BASE_URL = 'https://bump.tinyaii.cn/api/v1';
-const APP_KEY = 'app_e81c78a09bb9dc6703858f73';
+const APP_KEY = 'app_fe8c4d54ad3215425d3bab9d';
 
 export interface VersionCheckResult {
   hasUpdate: boolean;

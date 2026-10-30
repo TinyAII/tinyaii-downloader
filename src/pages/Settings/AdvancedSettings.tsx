@@ -12,6 +12,9 @@ import { useBasicSettingsStore } from '../../store/settings/basicStore';
 import { advancedSettingsDefaults, basicSettingsDefaults } from '../../store/settings/defaults';
 import { useAdvancedSettingsStore } from '../../store/settings/advancedStore';
 import { advancedSettingsKeys, basicSettingsKeys, migrateAdvancedSettings, migrateBasicSettings } from '../../store/settings/migration';
+import { applyGithubMirror, stripProtocol } from '../../utils/githubMirror';
+import { probeUrl } from '../../services/app/urlProbe';
+import type { GithubMirrorEntry } from '../../store/settings/types';
 import { useAdvancedSettingsValues, useSettingsActions } from '../../store/settings/selectors';
 import { appGetFileMeta, appGetInstallDir, appHttpGetText, appProbeListenPorts, appReadTextFile, appTruncateTextFile, aria2GetEngineStatus, aria2RestartEngine, type Aria2EngineStatus } from '../../services/download/aria2RpcEngine';
 import { parseUserAgentRules, USER_AGENT_MAX_LENGTH } from '../../utils/taskValidation';
@@ -298,6 +301,8 @@ export default function AdvancedSettings() {
   const navigate = useNavigate();
   const {
     useProxy,
+    githubMirrorId,
+    githubMirrorList,
     proxyProtocol,
     proxyHost,
     proxyPort,
@@ -1277,6 +1282,101 @@ export default function AdvancedSettings() {
     ? `当前策略：使用自定义 User-Agent（${normalizedUserAgent.length} 字符）`
     : '当前策略：使用 aria2 默认 User-Agent';
 
+  type ProbeLevel = 'ok' | 'warn' | 'bad';
+  const [mirrorProbe, setMirrorProbe] = useState<
+    Record<string, { text: string; level: ProbeLevel | 'pending' }>
+  >({});
+  const [newMirrorLabel, setNewMirrorLabel] = useState('');
+  const [newMirrorPrefix, setNewMirrorPrefix] = useState('');
+  const [editingMirrorId, setEditingMirrorId] = useState<string | null>(null);
+  const [editMirrorLabel, setEditMirrorLabel] = useState('');
+  const [editMirrorPrefix, setEditMirrorPrefix] = useState('');
+  const PROBE_TARGET =
+    'https://github.com/aria2/aria2/releases/download/release-1.37.0/aria2-1.37.0-win-64bit-build1.zip';
+
+  const probeColorClass = (level: 'ok' | 'warn' | 'bad' | 'pending') => {
+    if (level === 'ok') return 'text-emerald-600';
+    if (level === 'warn') return 'text-amber-600';
+    if (level === 'bad') return 'text-red-600';
+    return 'text-text-muted';
+  };
+
+  const handleProbeMirror = async (item: GithubMirrorEntry) => {
+    setMirrorProbe((prev) => ({ ...prev, [item.id]: { text: '测试中...', level: 'pending' } }));
+    try {
+      const result = await probeUrl(applyGithubMirror(PROBE_TARGET, item.prefix));
+      const seconds = result.elapsedMs / 1000;
+      const level: ProbeLevel = !result.ok
+        ? 'bad'
+        : seconds <= 1.5
+          ? 'ok'
+          : seconds <= 3
+            ? 'warn'
+            : 'bad';
+      setMirrorProbe((prev) => ({
+        ...prev,
+        [item.id]: {
+          text: result.ok ? `${seconds.toFixed(2)}s` : `失败 ${result.status}`,
+          level,
+        },
+      }));
+    } catch (_error) {
+      setMirrorProbe((prev) => ({ ...prev, [item.id]: { text: '连接失败', level: 'bad' } }));
+    }
+  };
+
+  const isValidPrefix = (value: string) => /^https?:\/\//i.test(value);
+
+  const handleAddMirror = () => {
+    const label = newMirrorLabel.trim();
+    const prefix = newMirrorPrefix.trim();
+    if (!isValidPrefix(prefix)) {
+      pushNotice('warning', '前缀要以 http:// 或 https:// 开头');
+      return;
+    }
+    updateSetting('githubMirrorList', [
+      ...githubMirrorList,
+      { id: `custom-${Date.now()}`, label: label || stripProtocol(prefix), prefix },
+    ]);
+    setNewMirrorLabel('');
+    setNewMirrorPrefix('');
+  };
+
+  const startEditMirror = (item: GithubMirrorEntry) => {
+    setEditingMirrorId(item.id);
+    setEditMirrorLabel(item.label);
+    setEditMirrorPrefix(item.prefix);
+  };
+
+  const handleSaveMirror = () => {
+    if (!editingMirrorId) return;
+    const prefix = editMirrorPrefix.trim();
+    if (!isValidPrefix(prefix)) {
+      pushNotice('warning', '前缀要以 http:// 或 https:// 开头');
+      return;
+    }
+    updateSetting(
+      'githubMirrorList',
+      githubMirrorList.map((item) =>
+        item.id === editingMirrorId
+          ? { ...item, label: editMirrorLabel.trim() || stripProtocol(prefix), prefix }
+          : item
+      )
+    );
+    setEditingMirrorId(null);
+  };
+
+  const handleRemoveMirror = (id: string) => {
+    if (id === 'direct') return;
+    updateSetting(
+      'githubMirrorList',
+      githubMirrorList.filter((item) => item.id !== id)
+    );
+    if (githubMirrorId === id) {
+      updateSetting('githubMirrorId', 'direct');
+    }
+  };
+
   return (
     <div className="flex flex-col h-full bg-main relative">
       {/* Header */}
@@ -1402,6 +1502,113 @@ export default function AdvancedSettings() {
             </Row>
           </Section>
 
+          <Section title="GitHub 加速">
+            <Row label="说明" align="start">
+              <span className="text-[12px] text-text-muted leading-relaxed">
+                只把 github.com、raw.githubusercontent.com 等链接改写成加速前缀，其它链接不受影响。
+                加速站能看到你下载的内容，需要校验完整性请在任务里填 checksum。
+              </span>
+            </Row>
+            {githubMirrorList.map((item) =>
+              editingMirrorId === item.id ? (
+                <div key={item.id} className="flex min-h-[32px] items-center gap-2 pl-48">
+                  <input
+                    value={editMirrorLabel}
+                    onChange={(event) => setEditMirrorLabel(event.target.value)}
+                    placeholder="名称"
+                    className="h-8 w-36 px-2 border border-black/10 rounded-md bg-white text-[12px] text-text-main outline-none focus:border-[#e5a038]"
+                  />
+                  <input
+                    value={editMirrorPrefix}
+                    onChange={(event) => setEditMirrorPrefix(event.target.value)}
+                    placeholder="https://example.com/"
+                    className="h-8 flex-1 px-2 border border-black/10 rounded-md bg-white text-[12px] text-text-main outline-none focus:border-[#e5a038]"
+                  />
+                  <button
+                    onClick={handleSaveMirror}
+                    className="px-3 py-1 rounded-md border border-[#e5a038] bg-[#e5a038] hover:bg-[#d49028] text-white text-[12px] transition-colors cursor-pointer"
+                  >
+                    保存
+                  </button>
+                  <button
+                    onClick={() => setEditingMirrorId(null)}
+                    className="px-3 py-1 rounded-md border border-black/10 bg-white hover:bg-black/5 text-[12px] text-text-main transition-colors cursor-pointer"
+                  >
+                    取消
+                  </button>
+                </div>
+              ) : (
+                <div key={item.id} className="flex min-h-[32px] items-center">
+                  <div className="w-48 shrink-0 pr-3">
+                    <div className="text-[13px] text-text-main truncate">{item.label}</div>
+                    <div className="text-[11px] text-text-muted truncate">
+                      {item.prefix ? stripProtocol(item.prefix) : '不改写链接'}
+                    </div>
+                    <button
+                      onClick={() => void handleProbeMirror(item)}
+                      title="点击重新测试"
+                      className={`inline-flex w-fit items-center gap-1 rounded-md border border-black/10 bg-white px-2 py-0.5 text-[12px] leading-5 transition-colors cursor-pointer hover:bg-black/5 ${probeColorClass(
+                        mirrorProbe[item.id]?.level ?? 'pending'
+                      )}`}
+                    >
+                      {mirrorProbe[item.id]?.text ?? '点击测试'}
+                    </button>
+                  </div>
+                  <div className="flex flex-1 items-center gap-2">
+                    <button
+                      onClick={() => updateSetting('githubMirrorId', item.id)}
+                      className={`px-3 py-1 border rounded-md text-[12px] transition-colors cursor-pointer ${
+                        githubMirrorId === item.id
+                          ? 'border-[#e5a038] bg-[#e5a038] text-white'
+                          : 'border-black/10 bg-white hover:bg-black/5 text-text-main'
+                      }`}
+                    >
+                      {githubMirrorId === item.id ? '使用中' : '使用'}
+                    </button>
+                    {item.id === 'direct' ? null : (
+                      <>
+                        <button
+                          onClick={() => startEditMirror(item)}
+                          className="px-3 py-1 rounded-md border border-black/10 bg-white hover:bg-black/5 text-[12px] text-text-main transition-colors cursor-pointer"
+                        >
+                          编辑
+                        </button>
+                        <button
+                          onClick={() => handleRemoveMirror(item.id)}
+                          className="px-3 py-1 rounded-md border border-black/10 bg-white hover:bg-black/5 text-[12px] text-text-muted transition-colors cursor-pointer"
+                        >
+                          删除
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </div>
+              )
+            )}
+            <div className="flex min-h-[32px] items-center">
+              <div className="w-48 shrink-0 pr-3 text-[13px] text-text-main">添加自定义</div>
+              <div className="flex flex-1 items-center gap-2">
+                <input
+                  value={newMirrorLabel}
+                  onChange={(event) => setNewMirrorLabel(event.target.value)}
+                  placeholder="名称（可选）"
+                  className="h-8 w-36 px-2 border border-black/10 rounded-md bg-white text-[12px] text-text-main outline-none focus:border-[#e5a038]"
+                />
+                <input
+                  value={newMirrorPrefix}
+                  onChange={(event) => setNewMirrorPrefix(event.target.value)}
+                  placeholder="https://example.com/"
+                  className="h-8 flex-1 px-2 border border-black/10 rounded-md bg-white text-[12px] text-text-main outline-none focus:border-[#e5a038]"
+                />
+                <button
+                  onClick={handleAddMirror}
+                  className="px-3 py-1 rounded-md border border-black/10 bg-white hover:bg-black/5 text-[12px] text-text-main transition-colors cursor-pointer"
+                >
+                  添加
+                </button>
+              </div>
+            </div>
+          </Section>
           <Section title="Tracker 服务器">
             <Row label="当前策略">
               <span className="text-[12px] text-text-muted">{trackerPolicyText}</span>

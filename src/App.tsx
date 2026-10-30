@@ -404,8 +404,8 @@ function InnerApp() {
     };
   }, [autoUpdateTracker, trackerSource]);
 
-  const handleCreateTasks = async (payload: CreateTaskPayload) => {
-    const createdCount = await createTasks(payload);
+  const handleCreateTasks = async (payload: CreateTaskPayload, mirrorPrefix?: string | null) => {
+    const createdCount = await createTasks(payload, mirrorPrefix);
     if (createdCount > 0) {
       setIsNewTaskModalOpen(false);
       if (jumpToDownload) {
