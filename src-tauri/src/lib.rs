@@ -2403,6 +2403,35 @@ async fn app_collect_webview_cookies(
     Ok(result)
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UrlProbeRequest {
+    url: String,
+}
+
+// 探测加速地址可用性：取 1 字节，返回状态码与耗时
+#[tauri::command]
+async fn app_probe_url(request: UrlProbeRequest) -> Result<Value, String> {
+    let target = request.url.trim().to_string();
+    if target.is_empty() {
+        return Err("url 不能为空".to_string());
+    }
+    let client = Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|error| format!("请求失败：{error}"))?;
+    let started = std::time::Instant::now();
+    let response = client
+        .get(&target)
+        .header(reqwest::header::RANGE, "bytes=0-0")
+        .send()
+        .await
+        .map_err(|error| format!("请求失败：{error}"))?;
+    let status = response.status().as_u16();
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    Ok(json!({ "status": status, "elapsedMs": elapsed_ms, "ok": status < 400 }))
+}
+
 #[tauri::command]
 async fn app_http_get_json(request: HttpJsonRequestDto) -> Result<Value, String> {
     let target_url = request.url.trim().to_string();
@@ -3512,6 +3541,7 @@ pub fn run() {
             app_open_plugin_webview,
             app_collect_webview_cookies,
             app_http_get_json,
+            app_probe_url,
             app_http_request_json,
             app_resolve_bilibili_links,
             plugin_list_installed,
@@ -3523,6 +3553,7 @@ pub fn run() {
             plugin_uninstall,
             plugin_toggle_enabled,
             api_server::api_get_info,
+            api_server::api_set_enabled,
             api_server::api_update_config
         ])
         .build(tauri::generate_context!())

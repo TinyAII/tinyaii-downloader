@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Check, Copy, Eye, EyeOff, Plug } from 'lucide-react';
-import { apiGetInfo, type LocalApiInfo } from '../../services/app/localApi';
+import { apiGetInfo, apiSetEnabled, type LocalApiInfo } from '../../services/app/localApi';
+import { Toggle } from '../../components/ui/Toggle';
 import { cn } from '../../utils/cn';
 
 const ENDPOINTS = [
@@ -20,6 +21,7 @@ export default function ApiPanel() {
   const [error, setError] = useState('');
   const [revealed, setRevealed] = useState(false);
   const [copied, setCopied] = useState<'token' | 'curl' | null>(null);
+  const [toggling, setToggling] = useState(false);
 
   useEffect(() => {
     let canceled = false;
@@ -36,6 +38,7 @@ export default function ApiPanel() {
   }, []);
 
   const port = info?.port ?? 17890;
+  const enabled = info?.enabled ?? false;
   const token = info?.token ?? '';
   const maskedToken = token ? `${token.slice(0, 6)}${'•'.repeat(12)}${token.slice(-4)}` : '未生成';
   const curlExample = `curl -H "X-Api-Token: ${token}" \\\n  http://127.0.0.1:${port}/api/v1/tasks`;
@@ -50,25 +53,56 @@ export default function ApiPanel() {
     }
   };
 
+  const handleToggle = async (next: boolean) => {
+    if (toggling) return;
+    setToggling(true);
+    try {
+      const updated = await apiSetEnabled(next);
+      setInfo(updated);
+      setError('');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setToggling(false);
+    }
+  };
+
+  const statusText = error
+    ? '读取失败'
+    : !info
+      ? '检测中'
+      : !info.enabled
+        ? '已关闭'
+        : info.running
+          ? `运行中 · 127.0.0.1:${info.port}`
+          : '已启用但未监听（端口可能被占用）';
+
   return (
     <div className="flex-1 flex flex-col h-full bg-main relative">
       <div className="flex items-center justify-between px-8 py-4 border-b border-black/5">
         <h1 className="text-xl font-medium text-text-main">本地 API</h1>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-3">
           <span
             className={cn(
               'w-1.5 h-1.5 rounded-full',
               info?.running ? 'bg-emerald-500' : 'bg-black/20'
             )}
           />
-          <span className="text-[13px] text-text-muted">
-            {error ? '读取失败' : info?.running ? `运行中 · 127.0.0.1:${port}` : '检测中'}
-          </span>
+          <span className="text-[13px] text-text-muted">{statusText}</span>
+          <Toggle checked={enabled} onChange={(next) => void handleToggle(next)} />
         </div>
       </div>
 
       <div className="flex-1 overflow-y-auto custom-scrollbar px-8 py-6">
-        <div className="max-w-3xl space-y-6">
+        {!enabled ? (
+          <div className="max-w-3xl mb-6 rounded-xl border border-black/10 bg-white px-5 py-4">
+            <div className="text-[13px] font-medium text-text-main mb-1">本地 API 已关闭</div>
+            <div className="text-[12px] text-text-muted leading-relaxed">
+              外部程序无法连接 127.0.0.1:{port}。打开右上角开关即可启用，地址与令牌保持不变。
+            </div>
+          </div>
+        ) : null}
+        <div className={cn('max-w-3xl space-y-6', !enabled && 'opacity-40 pointer-events-none select-none')}>
           <section className="rounded-xl border border-black/10 bg-white p-5">
             <div className="flex items-center gap-2 mb-4">
               <Plug size={15} className="text-primary" strokeWidth={2} />

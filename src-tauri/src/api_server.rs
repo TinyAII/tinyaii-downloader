@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -24,10 +25,13 @@ const SOCKET_TIMEOUT: Duration = Duration::from_secs(10);
 pub struct ApiShared {
     token: String,
     config: Mutex<Aria2RpcConfig>,
+    enabled: AtomicBool,
+    listening: AtomicBool,
 }
 
 pub fn start(app: tauri::AppHandle) {
     let token = load_or_create_token(&app);
+    let enabled = load_enabled(&app);
     let shared = Arc::new(ApiShared {
         token,
         config: Mutex::new(Aria2RpcConfig {
@@ -35,29 +39,68 @@ pub fn start(app: tauri::AppHandle) {
             rpc_secret: String::new(),
             aria2_executable_path: String::new(),
         }),
+        enabled: AtomicBool::new(enabled),
+        listening: AtomicBool::new(false),
     });
 
     if !app.manage(shared.clone()) {
         eprintln!("[api] ApiShared 已被管理，跳过重复注册");
     }
 
+    if enabled {
+        spawn_listener(shared);
+    }
+}
+
+// accept 是阻塞的，关不掉；改成非阻塞轮询，关闭时循环立刻退出并释放端口
+fn spawn_listener(shared: Arc<ApiShared>) {
+    if shared.listening.swap(true, Ordering::SeqCst) {
+        return;
+    }
     thread::spawn(move || {
         let listener = match TcpListener::bind(("127.0.0.1", API_PORT)) {
             Ok(listener) => listener,
             Err(error) => {
                 eprintln!("[api] 端口 {API_PORT} 绑定失败: {error}");
+                shared.listening.store(false, Ordering::SeqCst);
                 return;
             }
         };
-        for incoming in listener.incoming() {
-            let stream = match incoming {
-                Ok(stream) => stream,
-                Err(_) => continue,
-            };
-            let shared = shared.clone();
-            thread::spawn(move || handle_stream(stream, shared));
+        let _ = listener.set_nonblocking(true);
+        while shared.enabled.load(Ordering::SeqCst) {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    let shared = shared.clone();
+                    thread::spawn(move || handle_stream(stream, shared));
+                }
+                Err(_) => thread::sleep(Duration::from_millis(200)),
+            }
         }
+        shared.listening.store(false, Ordering::SeqCst);
     });
+}
+
+fn enabled_flag_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
+    app.path()
+        .app_data_dir()
+        .ok()
+        .map(|dir| dir.join("api-enabled"))
+}
+
+fn load_enabled(app: &tauri::AppHandle) -> bool {
+    enabled_flag_path(app)
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|text| text.trim() == "1")
+        .unwrap_or(false)
+}
+
+fn save_enabled(app: &tauri::AppHandle, enabled: bool) {
+    if let Some(path) = enabled_flag_path(app) {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(path, if enabled { "1" } else { "0" });
+    }
 }
 
 fn load_or_create_token(app: &tauri::AppHandle) -> String {
@@ -754,7 +797,42 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 
 #[tauri::command]
 pub fn api_get_info(shared: tauri::State<'_, Arc<ApiShared>>) -> Value {
-    json!({ "port": API_PORT, "running": true, "token": shared.token })
+    json!({
+        "port": API_PORT,
+        "enabled": shared.enabled.load(Ordering::SeqCst),
+        "running": shared.listening.load(Ordering::SeqCst),
+        "token": shared.token
+    })
+}
+
+#[tauri::command]
+pub fn api_set_enabled(
+    app: tauri::AppHandle,
+    enabled: bool,
+    shared: tauri::State<'_, Arc<ApiShared>>,
+) -> Value {
+    save_enabled(&app, enabled);
+    shared.enabled.store(enabled, Ordering::SeqCst);
+
+    if enabled {
+        spawn_listener(shared.inner().clone());
+    } else {
+        // 等监听循环退出，避免返回"已关闭"但端口还占用
+        for _ in 0..10 {
+            if !shared.listening.load(Ordering::SeqCst) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    json!({
+        "ok": true,
+        "port": API_PORT,
+        "enabled": enabled,
+        "running": shared.listening.load(Ordering::SeqCst),
+        "token": shared.token
+    })
 }
 
 #[tauri::command]
