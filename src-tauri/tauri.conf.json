@@ -31,6 +31,8 @@
     "windows": {
       "nsis": {
         "installerIcon": "icons/icon.ico",
+        "headerImage": "nsis/header.bmp",
+        "sidebarImage": "nsis/sidebar.bmp",
         "startMenuFolder": "TinyAii下载器",
         "languages": [
           "SimpChinese"
