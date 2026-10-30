@@ -25,8 +25,68 @@ const SOCKET_TIMEOUT: Duration = Duration::from_secs(10);
 pub struct ApiShared {
     token: String,
     config: Mutex<Aria2RpcConfig>,
+    mirrors: Mutex<MirrorSnapshot>,
     enabled: AtomicBool,
     listening: AtomicBool,
+}
+
+// 前端把 GitHub 加速列表推过来，API 建任务时据此改写链接（API 不修改客户端设置）
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MirrorEntryDto {
+    pub id: String,
+    pub label: String,
+    pub prefix: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct MirrorSnapshot {
+    pub active_id: String,
+    pub list: Vec<MirrorEntryDto>,
+}
+
+// 与前端 src/utils/githubMirror.ts 保持一致：只改写这些域名
+const MIRRORABLE_HOSTS: [&str; 6] = [
+    "github.com",
+    "www.github.com",
+    "codeload.github.com",
+    "raw.githubusercontent.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+];
+
+fn url_host(url: &str) -> Option<String> {
+    let rest = url.split("://").nth(1)?;
+    let host = rest
+        .split(['/', '?', '#'])
+        .next()?
+        .split('@')
+        .last()?
+        .split(':')
+        .next()?;
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_ascii_lowercase())
+    }
+}
+
+fn apply_mirror(url: &str, prefix: &str) -> String {
+    let trimmed = prefix.trim();
+    if trimmed.is_empty() {
+        return url.to_string();
+    }
+    match url_host(url) {
+        Some(host) if MIRRORABLE_HOSTS.contains(&host.as_str()) => {
+            let base = if trimmed.ends_with('/') {
+                trimmed.to_string()
+            } else {
+                format!("{trimmed}/")
+            };
+            format!("{base}{url}")
+        }
+        _ => url.to_string(),
+    }
 }
 
 pub fn start(app: tauri::AppHandle) {
@@ -39,6 +99,7 @@ pub fn start(app: tauri::AppHandle) {
             rpc_secret: String::new(),
             aria2_executable_path: String::new(),
         }),
+        mirrors: Mutex::new(MirrorSnapshot::default()),
         enabled: AtomicBool::new(enabled),
         listening: AtomicBool::new(false),
     });
@@ -181,6 +242,14 @@ fn handle_stream(mut stream: TcpStream, shared: Arc<ApiShared>) {
         }
     };
 
+    let mirrors = match shared.mirrors.lock() {
+        Ok(guard) => guard.clone(),
+        Err(_) => {
+            write_json(&mut stream, 500, error_body("state_error", "镜像配置状态不可用"));
+            return;
+        }
+    };
+
     let segments: Vec<&str> = request
         .path
         .trim_matches('/')
@@ -192,13 +261,13 @@ fn handle_stream(mut stream: TcpStream, shared: Arc<ApiShared>) {
         ("GET", ["api", "v1", "ping"]) => ping(&config),
         ("GET", ["api", "v1", "tasks"]) => list_tasks(&config),
         ("GET", ["api", "v1", "tasks", id]) => get_task(&config, id.trim()),
-        ("POST", ["api", "v1", "tasks"]) => create_tasks(&config, &request.body),
+        ("POST", ["api", "v1", "tasks"]) => create_tasks(&config, &mirrors, &request.body),
         ("POST", ["api", "v1", "tasks", id, "pause"]) => task_action(&config, id.trim(), "aria2.pause"),
         ("POST", ["api", "v1", "tasks", id, "resume"]) => task_action(&config, id.trim(), "aria2.unpause"),
         ("POST", ["api", "v1", "tasks", id, "remove"]) => remove_task(&config, id.trim()),
-        ("GET", ["api", "v1", "config"]) => get_config(&config),
+        ("GET", ["api", "v1", "config"]) => get_config(&config, &mirrors),
         ("POST", ["api", "v1", "config", "speed"]) => set_global_speed_limit(&config, &request.body),
-        ("POST", ["mcp"]) => mcp_handle(&config, &request.body),
+        ("POST", ["mcp"]) => mcp_handle(&config, &mirrors, &request.body),
         _ => (404, error_body("not_found", "接口不存在")),
     };
 
@@ -307,6 +376,12 @@ struct ApiCreateTaskRequest {
     max_download_limit: Option<u64>,
     #[serde(default, alias = "maxUploadSpeed")]
     max_upload_limit: Option<u64>,
+    // 本次任务使用哪个加速：id 取自 GET /config 的 mirrors.list，或直接给前缀
+    // 都不传 = 跟随客户端当前设置；githubMirror 传空串 = 本次直连
+    #[serde(default)]
+    github_mirror_id: Option<String>,
+    #[serde(default)]
+    github_mirror: Option<String>,
     #[serde(default)]
     lowest_speed_limit: Option<u64>,
     #[serde(default)]
@@ -331,7 +406,7 @@ fn default_save_path() -> String {
     std::env::temp_dir().to_string_lossy().to_string()
 }
 
-fn create_tasks(config: &Aria2RpcConfig, body: &[u8]) -> (u16, Value) {
+fn create_tasks(config: &Aria2RpcConfig, mirrors: &MirrorSnapshot, body: &[u8]) -> (u16, Value) {
     let request: ApiCreateTaskRequest = match serde_json::from_slice(body) {
         Ok(value) => value,
         Err(error) => {
@@ -348,8 +423,43 @@ fn create_tasks(config: &Aria2RpcConfig, body: &[u8]) -> (u16, Value) {
         return (400, error_body("invalid_request", "links 不能为空"));
     }
 
+    let mirror_prefix = match (&request.github_mirror, &request.github_mirror_id) {
+        (Some(prefix), _) => prefix.clone(),
+        (None, Some(id)) => match mirrors.list.iter().find(|item| &item.id == id) {
+            Some(entry) => entry.prefix.clone(),
+            None => {
+                let available: Vec<&str> = mirrors.list.iter().map(|item| item.id.as_str()).collect();
+                return (
+                    400,
+                    error_body(
+                        "mirror_not_found",
+                        &format!(
+                            "没有这个加速项：{id}；可用项：{}",
+                            if available.is_empty() {
+                                "（客户端未配置加速列表）".to_string()
+                            } else {
+                                available.join(", ")
+                            }
+                        ),
+                    ),
+                );
+            }
+        },
+        (None, None) => mirrors
+            .list
+            .iter()
+            .find(|item| item.id == mirrors.active_id)
+            .map(|item| item.prefix.clone())
+            .unwrap_or_default(),
+    };
+    let links: Vec<String> = request
+        .links
+        .iter()
+        .map(|link| apply_mirror(link, &mirror_prefix))
+        .collect();
+
     let payload = CreateTaskPayload {
-        links: request.links,
+        links,
         torrent_files: Vec::new(),
         rename: request.rename,
         split_count: request.split_count.unwrap_or(DEFAULT_SPLIT_COUNT),
@@ -461,7 +571,13 @@ fn mcp_tools() -> Value {
                     "savePath": { "type": "string", "description": "缺省为 用户目录/Downloads" },
                     "rename": { "type": "string" },
                     "splitCount": { "type": "integer" },
-                    "maxConnectionsPerServer": { "type": "integer" }
+                    "maxConnectionsPerServer": { "type": "integer" },
+                    "maxDownloadLimit": { "type": "integer", "description": "字节/秒，0 为不限" },
+                    "maxUploadLimit": { "type": "integer", "description": "字节/秒，0 为不限" },
+                    "lowestSpeedLimit": { "type": "integer", "description": "低于该速度判定失败，字节/秒" },
+                    "checksum": { "type": "string", "description": "形如 sha-256=<hex>" },
+                    "githubMirror": { "type": "string", "description": "本次任务使用的加速前缀，空串表示直连；不传则跟随客户端设置" },
+                    "githubMirrorId": { "type": "string", "description": "取自 GET /api/v1/config 的 mirrors.list[].id" }
                 },
                 "required": ["links"]
             }
@@ -481,7 +597,7 @@ fn mcp_tools() -> Value {
     ])
 }
 
-fn mcp_handle(config: &Aria2RpcConfig, body: &[u8]) -> (u16, Value) {
+fn mcp_handle(config: &Aria2RpcConfig, mirrors: &MirrorSnapshot, body: &[u8]) -> (u16, Value) {
     let message: Value = match serde_json::from_slice(body) {
         Ok(value) => value,
         Err(error) => {
@@ -504,11 +620,15 @@ fn mcp_handle(config: &Aria2RpcConfig, body: &[u8]) -> (u16, Value) {
         "initialize" => Ok(json!({
             "protocolVersion": MCP_PROTOCOL_VERSION,
             "capabilities": { "tools": {} },
-            "serverInfo": { "name": "tinyaii-downloader", "version": "1.0.0" }
+            "serverInfo": { "name": "tinyaii-downloader", "version": env!("CARGO_PKG_VERSION") }
         })),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({ "tools": mcp_tools() })),
-        "tools/call" => mcp_call_tool(config, message.get("params").cloned().unwrap_or(Value::Null)),
+        "tools/call" => mcp_call_tool(
+            config,
+            mirrors,
+            message.get("params").cloned().unwrap_or(Value::Null),
+        ),
         other => Err((-32601, format!("不支持的方法: {other}"))),
     };
 
@@ -521,7 +641,11 @@ fn mcp_handle(config: &Aria2RpcConfig, body: &[u8]) -> (u16, Value) {
     }
 }
 
-fn mcp_call_tool(config: &Aria2RpcConfig, params: Value) -> Result<Value, (i64, String)> {
+fn mcp_call_tool(
+    config: &Aria2RpcConfig,
+    mirrors: &MirrorSnapshot,
+    params: Value,
+) -> Result<Value, (i64, String)> {
     let name = params
         .get("name")
         .and_then(Value::as_str)
@@ -551,7 +675,7 @@ fn mcp_call_tool(config: &Aria2RpcConfig, params: Value) -> Result<Value, (i64, 
         "create_download" => {
             let bytes = serde_json::to_vec(&arguments)
                 .map_err(|error| (-32602, format!("参数序列化失败: {error}")))?;
-            create_tasks(config, &bytes).1
+            create_tasks(config, mirrors, &bytes).1
         }
         "control_download" => {
             let gid = arguments.get("gid").and_then(Value::as_str).unwrap_or_default();
@@ -595,7 +719,11 @@ fn filter_tasks(body: Value, wanted: &str) -> Value {
     json!({ "ok": true, "count": filtered.len(), "tasks": filtered })
 }
 
-fn get_config(config: &Aria2RpcConfig) -> (u16, Value) {
+fn get_config(config: &Aria2RpcConfig, mirrors: &MirrorSnapshot) -> (u16, Value) {
+    let mirror_payload = json!({
+        "activeId": mirrors.active_id,
+        "list": mirrors.list,
+    });
     let config = config.clone();
     let result: Result<Value, String> = tauri::async_runtime::block_on(async move {
         let client = reqwest::Client::new();
@@ -613,6 +741,7 @@ fn get_config(config: &Aria2RpcConfig) -> (u16, Value) {
                     "lowestSpeedLimit": value.get("lowest-speed-limit").cloned().unwrap_or(Value::Null),
                     "maxConcurrentDownloads": value.get("max-concurrent-downloads").cloned().unwrap_or(Value::Null)
                 },
+                "mirrors": mirror_payload.clone(),
                 "note": "下载目录与并发数由客户端设置管理，这里只读"
             }),
         ),
@@ -833,6 +962,23 @@ pub fn api_set_enabled(
         "running": shared.listening.load(Ordering::SeqCst),
         "token": shared.token
     })
+}
+
+#[tauri::command]
+pub fn api_update_mirrors(
+    mirrors: Vec<MirrorEntryDto>,
+    active_id: String,
+    shared: tauri::State<'_, Arc<ApiShared>>,
+) -> Result<(), String> {
+    let mut guard = shared
+        .mirrors
+        .lock()
+        .map_err(|_| "镜像配置状态不可用".to_string())?;
+    *guard = MirrorSnapshot {
+        active_id,
+        list: mirrors,
+    };
+    Ok(())
 }
 
 #[tauri::command]

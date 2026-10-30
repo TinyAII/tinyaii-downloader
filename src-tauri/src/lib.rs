@@ -3554,6 +3554,7 @@ pub fn run() {
             plugin_toggle_enabled,
             api_server::api_get_info,
             api_server::api_set_enabled,
+            api_server::api_update_mirrors,
             api_server::api_update_config
         ])
         .build(tauri::generate_context!())

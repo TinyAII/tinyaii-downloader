@@ -6,7 +6,7 @@ import TaskSidebar from './components/layout/TaskSidebar';
 import TitleBar from './components/layout/TitleBar';
 import { appExit, appIsAutostartLaunch } from './services/app/appRuntime';
 import { checkVersionUpdate } from './services/app/backendApi';
-import { apiUpdateConfig } from './services/app/localApi';
+import { apiUpdateConfig, apiUpdateMirrors } from './services/app/localApi';
 import { appGetInstallDir, appHttpGetText, aria2SetGlobalSpeedLimit, aria2SetGlobalTrackerList, aria2StartTask } from './services/download/aria2RpcEngine';
 import { captureWindowState, restoreWindowState } from './services/app/windowState';
 import { useBasicSettingsStore } from './store/settings/basicStore';
@@ -170,6 +170,7 @@ function InnerApp() {
         rpcSecret: state.rpcSecret,
         aria2ExecutablePath: state.aria2ExecutablePath,
       }).catch(() => undefined);
+      void apiUpdateMirrors(state.githubMirrorList, state.githubMirrorId).catch(() => undefined);
     };
     pushApiConfig();
     return useAdvancedSettingsStore.subscribe(pushApiConfig);
