@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { ExternalLink, X } from 'lucide-react';
 import type { VersionCheckResult } from '../services/app/backendApi';
+import { RELEASE_SOURCES } from '../utils/downloadSources';
 
 interface UpdateModalProps {
   isOpen: boolean;
@@ -53,6 +54,14 @@ export default function UpdateModal({ isOpen, updateInfo, onClose }: UpdateModal
     }
   };
 
+  const handleOpenSource = async (url: string) => {
+    try {
+      await openUrl(url);
+    } catch (_error) {
+      window.open(url, '_blank', 'noopener,noreferrer');
+    }
+  };
+
   // 强制更新但没给下载地址时，弹窗必须允许关闭，否则用户会被卡死
   const canDismiss = !updateInfo.forceUpdate || !updateInfo.downloadUrl;
 
@@ -88,26 +97,38 @@ export default function UpdateModal({ isOpen, updateInfo, onClose }: UpdateModal
             </div>
           )}
         </div>
-        <div className="px-6 py-4 border-t border-black/5 flex items-center justify-end gap-3">
-          {canDismiss ? (
-            <button
-              onClick={onClose}
-              className="h-9 px-4 rounded-md border border-black/10 bg-white hover:bg-black/5 text-[13px] text-text-main transition-colors cursor-pointer"
-            >
-              {updateInfo.forceUpdate ? '关闭' : '稍后再说'}
-            </button>
-          ) : null}
-          {updateInfo.downloadUrl ? (
-            <button
-              onClick={() => void handleOpenDownload()}
-              className="h-9 px-4 rounded-md border border-[#e5a038] bg-[#e5a038] hover:bg-[#d49028] text-white text-[13px] transition-colors cursor-pointer inline-flex items-center gap-1.5"
-            >
-              <ExternalLink size={14} />
-              立即更新
-            </button>
-          ) : (
-            <span className="text-[12px] text-text-muted">该版本未提供下载地址，请前往发布页获取</span>
-          )}
+        <div className="px-6 py-4 border-t border-black/5 flex flex-wrap items-center justify-between gap-3">
+          <span className="text-[12px] text-text-muted">
+            {updateInfo.downloadUrl ? '也可以到发布页手动下载' : '选择下载来源'}
+          </span>
+          <div className="flex items-center gap-2">
+            {canDismiss ? (
+              <button
+                onClick={onClose}
+                className="h-9 px-4 rounded-md border border-black/10 bg-white hover:bg-black/5 text-[13px] text-text-main transition-colors cursor-pointer"
+              >
+                {updateInfo.forceUpdate ? '关闭' : '稍后再说'}
+              </button>
+            ) : null}
+            {updateInfo.downloadUrl ? (
+              <button
+                onClick={() => void handleOpenDownload()}
+                className="h-9 px-4 rounded-md border border-[#e5a038] bg-[#e5a038] hover:bg-[#d49028] text-white text-[13px] transition-colors cursor-pointer inline-flex items-center gap-1.5"
+              >
+                <ExternalLink size={14} />
+                立即更新
+              </button>
+            ) : null}
+            {RELEASE_SOURCES.map((source) => (
+              <button
+                key={source.id}
+                onClick={() => void handleOpenSource(source.url)}
+                className="h-9 px-4 rounded-md border border-black/10 bg-white hover:bg-black/5 text-[13px] text-text-main transition-colors cursor-pointer inline-flex items-center gap-1.5"
+              >
+                {source.label}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
     </div>,
